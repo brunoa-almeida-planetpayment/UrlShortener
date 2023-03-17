@@ -1,4 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
+using ShortURL.Handlers;
+using ShortURL.Handlers.Commands;
+using ShortURL.Handlers.Queries;
 
 namespace ShortURL.Controllers;
 
@@ -7,94 +10,37 @@ namespace ShortURL.Controllers;
 public class ShortUrlController : ControllerBase
 {
     private readonly ILogger<ShortUrlController> _logger;
-    private readonly IRedis _redis;
-    private readonly IUrlRepository _urlRepository;
+    private readonly ICommandHandler<CreateShortUrlCommand, CreateShortUrlResponse> _createShortUrlCommandHandler;
+    private readonly IQueryHandler<GetUrlQuery, GetUrlResponse> _getUrlQueryHandler;
 
-    public ShortUrlController(ILogger<ShortUrlController> logger)
+    public ShortUrlController(ILogger<ShortUrlController> logger,
+        ICommandHandler<CreateShortUrlCommand, CreateShortUrlResponse> createShortUrlCommandHandler,
+        IQueryHandler<GetUrlQuery, GetUrlResponse> getUrlQueryHandler)
     {
         _logger = logger;
+        _createShortUrlCommandHandler = createShortUrlCommandHandler;
+        _getUrlQueryHandler = getUrlQueryHandler;
     }
 
     [HttpGet("/{shortUrl}")]
-    public async Task<IActionResult> Get([FromRoute]string shortUrl)
+    public async Task<IActionResult> Get([FromRoute] string shortUrl)
     {
-        var originalLink = await _redis.Get(shortUrl);
-        
-        if (string.IsNullOrWhiteSpace(originalLink))
-        {
-            _redis.Lock(shortUrl, async () =>
-            {
-                originalLink = await _redis.Get(shortUrl);
-                if (string.IsNullOrWhiteSpace(originalLink))
-                {
-                    originalLink = await _urlRepository.Get(shortUrl);
-                    await _redis.Save(new Url { OriginalVersion = originalLink, ShortVersion = shortUrl });
-                }
-            });
-        }
-        
-        if (string.IsNullOrWhiteSpace(originalLink))
-            return NotFound();
-        
-        var originalUrl = "https://www.weareplanet.com";
-        var redirect = new RedirectResult(originalLink, true);
-        return redirect;
+        var query = new GetUrlQuery(shortUrl);
+        var response = await _getUrlQueryHandler.Handle(query);
 
+        if (string.IsNullOrWhiteSpace(response.originalUrl))
+            return NotFound();
+
+        var redirect = new RedirectResult(response.originalUrl, true);
+        return redirect;
     }
 
     [HttpPost("")]
-    public async Task<IActionResult> Post([FromBody] string originalLink)
+    public async Task<IActionResult> Post([FromBody] string url)
     {
-        var code = CreateUrlShortVersion();
-        var shortLinkAlreadyExists = true;
-       
-        while (shortLinkAlreadyExists)
-        {
-            var foundShortUrl = await _urlRepository.Get(code);
-            if (!string.IsNullOrWhiteSpace(foundShortUrl))
-            {
-                code = CreateUrlShortVersion();
-                shortLinkAlreadyExists = false;
-            }
-        }
+        var command = new CreateShortUrlCommand(url);
+        var response = await _createShortUrlCommandHandler.Handle(command).ConfigureAwait(false);
 
-        Url url = new()
-        {
-            OriginalVersion = originalLink,
-            ShortVersion = $"https://pl.net/{code}",
-            Code = code
-        };
-
-        await _urlRepository.Save(url);
-        await _redis.Save(url);
-
-        return Ok(url.ShortVersion);
+        return Ok(response);
     }
-
-    private string CreateUrlShortVersion()
-    {
-        var characters = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        var code = string.Empty;
-        
-        Random random = new ();
-        for (var i = 0; i < 6; i++)
-        {
-            code += characters[random.Next(characters.Length)];
-        }
-        return code;
-    }
-}
-
-public interface IRedis
-{
-    Task<string> Get(string link);
-    Task Save(Url urlLink);
-
-    void Lock(string key, Action action);
-}
-
-public interface IUrlRepository
-{
-    Task<string> Get(string link);
-    Task Save(Url urlLink);
 }
